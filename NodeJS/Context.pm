@@ -67,7 +67,20 @@ sub new
 }
 # EO constructor
 
+sub exports
+{
 
+	# query the js context for the exported module (may only partially filled yet)
+	$_[0]->eval('__core__.modules.loaded[' . $_[0]->{'cache'}->{$_[1]} . '].exports;');
+
+}
+
+####################################################################################################
+# require is mainly called from js code
+####################################################################################################
+
+# load additional js module
+# ***************************************************************************************
 sub require
 {
 
@@ -87,8 +100,10 @@ sub require
 	else
 	{
 
+		# check if the module is already loaded (core module?)
 		return $self->eval("__core__.$mod") if $self->eval("__core__.$mod");
 
+		# look into include paths
 		foreach my $path (@paths)
 		{
 			$path = rel2abs($path);
@@ -97,92 +112,147 @@ sub require
 			my $dir = $self->load_as_directory($path, $mod);
 			return $dir if defined $dir;
 		}
+		# EO each path
+
 	}
-
-
-#	local @paths = @paths;
-
+	# EO is a module
 
 }
+# EO require
+
+####################################################################################################
+# pass to context
+####################################################################################################
 
 sub eval
 {
 	# get input arguments
 	my ($self, $js, $orig) = @_;
-die "no js" unless $js;
-$orig = 'NA' unless defined $orig;
-die "no orig" unless $orig;
-
+	# assertion for valid context
+	die "no context" unless $self->{'context'};
 	# return whatever the result may be
-	die unless $self->{'context'};
-	$self->{'context'}->eval($js, $orig);
+	$self->{'context'}->eval($js, $orig || '[NA]');
 }
+
+####################################################################################################
+# load and decode a json data file
+####################################################################################################
+
+sub load_json
+{
+
+	# get input arguments
+	my ($self, $file) = @_;
+
+	# assertion for a valid file
+	die "undefined file" unless defined $file;
+
+	my $cache = $self->{'cache'};
+	my $context = $self->{'context'};
+
+	# put a message to the console
+	warn "JSONDATA ", abs2rel($file, $CWD), "\n";
+
+	# read the json data file (use utf8 encoding)
+	my $raw = read_file($file, { binmode => ':utf8' });
+
+	# decode the json data (will do a strict check)
+	my $json = decode_json($raw) if defined $raw;
+
+	# return data
+	return $json;
+
+}
+# EO load_json
+
+####################################################################################################
+# load a NodeJS module
+####################################################################################################
+
+sub load_module
+{
+
+	my ($self, $file) = @_;
+
+	return undef unless defined $file;
+
+	my $cache = $self->{'cache'};
+	my $context = $self->{'context'};
+
+	# local @paths = @paths;
+	my $abs = rel2abs($file, $CWD);
+
+	# return from cache
+	if (exists $cache->{$abs})
+	{
+		return $self->exports($abs);
+	}
+
+	# read the nodejs module (use utf8 encoding)
+	my $bin = read_file($file, { binmode => ':utf8' });
+
+	# put a message to the console
+	warn "REQUIRE ", abs2rel($file, $CWD), "\n";
+
+	# XXX - retest how to handle this correctly
+	$context->eval('throw("err");', $file) unless defined $bin;
+	die "could not read $file" unless defined $bin;
+
+	# add the directory to lookup paths
+	push @paths, catfile dirname($file);
+
+	# store the index of the javascript array (object is not synched)
+	$cache->{$abs} = $context->eval('__core__.modules.loaded.length;');
+
+	# create the module context
+	my $js = '(function(module){
+		var exports = module.exports;
+		__core__.modules.loaded.push(module);
+		' . $bin . ';
+		return module.exports;
+	})({ exports: function () {} });';
+
+	# XXX - retest how to handle this correctly
+	my $rv = $context->eval($js, $file);
+	warn "error loading $file\n$@" if $@;
+	$context->eval('throw("'.$@. '");', $file) if $@;
+	die $@ if $@;
+
+	# export javascript module
+	return $self->exports($abs);
+
+}
+# EO load_module
+
+####################################################################################################
+# try to load path as a file
+####################################################################################################
 
 sub load_as_file
 {
 
-		my $file;
-
 		my ($self, $cwd, $path) = @_;
-
-		my $cache = $self->{'cache'};
-		my $context = $self->{'context'};
 
 		if (-f catfile $cwd, $path)
 		{
-			$file = catfile $cwd, $path;
+			return $self->load_module(catfile($cwd, $path));
 		}
 		elsif (-f catfile $cwd, $path . '.js')
 		{
-			$file = catfile $cwd, $path . '.js';
+			return $self->load_module(catfile($cwd, $path . '.js'));
 		}
 		elsif (-f catfile $cwd, $path . '.json')
 		{
-			$file = catfile $cwd, $path . '.json';
-			my $bin = read_file($file, { binmode => ':utf8' });
-			my $json = decode_json($bin);
-			return $json;
-		}
-
-		if (defined $file)
-		{
-			# local @paths = @paths;
-			my $abs = rel2abs($file, $CWD);
-			return $context->eval('__core__.modules.loaded['.$cache->{$abs}.'].exports;') if $cache->{$abs};
-			my $bin = read_file($file, { binmode => ':utf8' });
-
-
-			if (exists $cache->{$abs})
-			{
-				warn "====", $context->eval('__core__.modules.loaded['.$cache->{$abs}.'].exports;');
-				return $context->eval('__core__.modules.loaded['.$cache->{$abs}.'].exports;');
-			}
-
-			warn "LOAD2 ", abs2rel($file, $CWD), "\n";
-			$context->eval('throw("err");', $file) unless defined $bin;
-			die "could not read $file" unless defined $bin;
-
-			push @paths, catfile dirname($file);
-
-			$cache->{$abs} = {};
-
-			$context->eval('var module = {};');
-
-			$cache->{$abs} = $context->eval('__core__.modules.loaded.length;');
-
-			$bin = '(function(module){ var exports = module.exports; __core__.modules.loaded.push(module); ' . "\n" . $bin . '; return module.exports; })({ exports: function () {} });';
-			my $rv = $context->eval($bin, $file);
-			warn "error loading $file\n$@" if $@;
-			$context->eval('throw("'.$@. '");', $file) if $@;
-			die $@ if $@;
-			# warn " -- ", $context->eval('__core__.modules.loaded['.$cache->{$abs}.'].exports;');
-			return $context->eval('__core__.modules.loaded['.$cache->{$abs}.'].exports;');
+			return $self->load_json(catfile($cwd, $path . '.json'));
 		}
 
 		return undef;
 
-
 }
+
+####################################################################################################
+# try to load module from directory
+####################################################################################################
 
 sub load_as_directory
 {
@@ -193,8 +263,6 @@ sub load_as_directory
 
 		my $cache = $self->{'cache'};
 		my $context = $self->{'context'};
-
-#		warn "try $CWD ", catfile($cwd, $path, 'index.js'), "\n";
 
 		if (-f catfile $cwd, $path, 'package.json')
 		{
